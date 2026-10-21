@@ -1,0 +1,25 @@
+{
+	"name": "kdl-pipe",
+	"displayName": "KDL Node Pipes",
+	"description": "Adds syntax highlighting for experimental KDL node pipes (`a #> b`) to the KDL extension",
+	"publisher": "tachuris",
+	"version": "0.0.1",
+	"private": true,
+	"engines": {
+		"vscode": "^1.80.0"
+	},
+	"categories": [
+		"Programming Languages"
+	],
+	"contributes": {
+		"grammars": [
+			{
+				"scopeName": "source.kdl.pipe",
+				"path": "./pipe.tmLanguage.json",
+				"injectTo": [
+					"source.kdl"
+				]
+			}
+		]
+	}
+}

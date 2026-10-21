@@ -1,0 +1,75 @@
+{
+	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	"scopeName": "source.kdl.pipe",
+	"injectionSelector": "L:source.kdl -comment -string",
+	"patterns": [
+		{
+			"include": "#slashdashed_node"
+		},
+		{
+			"include": "#slashdashed_stage"
+		},
+		{
+			"include": "#pipe"
+		}
+	],
+	"repository": {
+		"slashdashed_node": {
+			"comment": "Matches a slashdashed node with its stages, including stages on the following lines. The KDL grammar's node slashdash ends at the end of the line, and only covers a single token after { or ;.",
+			"name": "comment.block.slashdash.kdl",
+			"begin": "(?:^|(?<=[{;]))\\s*/-(?!\\s*#>)",
+			"end": ";|(?=\\})|^(?!\\s*(?:(?:/-\\s*)?#>|//|$))",
+			"patterns": [
+				{
+					"include": "#slashdashed_string"
+				},
+				{
+					"include": "#slashdashed_children"
+				},
+				{
+					"include": "#slashdashed_trailing_pipe"
+				}
+			]
+		},
+		"slashdashed_string": {
+			"comment": "Skips strings, so a ; or brace inside one doesn't end the slashdashed node.",
+			"match": "\"(?:[^\"\\\\]|\\\\.)*\""
+		},
+		"slashdashed_children": {
+			"comment": "Skips a children block, which can span lines.",
+			"begin": "\\{",
+			"end": "\\}",
+			"patterns": [
+				{
+					"include": "#slashdashed_string"
+				},
+				{
+					"include": "#slashdashed_children"
+				}
+			]
+		},
+		"slashdashed_trailing_pipe": {
+			"comment": "A #> at the end of a line continues the chain on the next line, up to the next stage's name.",
+			"begin": "#>(?=\\s*(?://.*)?$)",
+			"end": "[^\\s;{}]+|(?=[;{}])"
+		},
+		"slashdashed_stage": {
+			"comment": "Matches a slashdashed stage up to the next stage, the end of the node, or the end of the line. A stage whose #> ends a line continues on the next line. The KDL grammar's inline slashdash only covers a single token.",
+			"name": "comment.block.slashdash.kdl",
+			"begin": "\\s*/-\\s*#>",
+			"end": "(?=\\s*(?:/-\\s*)?#>|;|\\})|(?<!\\\\)(?<!#>)(?<!#>\\s+)$"
+		},
+		"pipe": {
+			"comment": "Matches #> and the next stage's name, with an optional type annotation before the name.",
+			"match": "(#>)(?:\\s*(\\([^)]*\\))?\\s*((?![/\\\\{}#;\\[\\]=\"])[<>:\\w\\-~,'`!?@$%^&*+|.]+))?",
+			"captures": {
+				"1": {
+					"name": "keyword.operator.pipe.kdl"
+				},
+				"3": {
+					"name": "entity.name.tag"
+				}
+			}
+		}
+	}
+}

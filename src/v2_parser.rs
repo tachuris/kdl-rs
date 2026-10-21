@@ -24,6 +24,9 @@ use crate::{
     KdlIdentifier, KdlNode, KdlNodeFormat, KdlValue,
 };
 
+#[cfg(feature = "experimental-node-pipes")]
+use crate::node::KdlPipeFormat;
+
 type Input<'a> = Recoverable<LocatingSlice<&'a str>, ErrMode<KdlParseError>>;
 type PResult<T> = winnow::ModalResult<T, KdlParseError>;
 
@@ -280,7 +283,7 @@ pub(crate) fn document(input: &mut Input<'_>) -> PResult<KdlDocument> {
 
 /// `nodes := (line-space* node)* line-space*`
 fn nodes(input: &mut Input<'_>) -> PResult<KdlDocument> {
-    let mut leading = repeat(0.., alt((line_space.void(), (slashdash, base_node).void())))
+    let mut leading = repeat(0.., alt((line_space.void(), slashdashed_node)))
         .map(|()| ())
         .take()
         .parse_next(input)?;
@@ -293,7 +296,7 @@ fn nodes(input: &mut Input<'_>) -> PResult<KdlDocument> {
     .parse_next(input)?;
     let _span = span_from_checkpoint(input, &_start);
     opt(node_terminator).parse_next(input)?;
-    let trailing = repeat(0.., alt((line_space.void(), (slashdash, base_node).void())))
+    let trailing = repeat(0.., alt((line_space.void(), slashdashed_node)))
         .map(|()| ())
         .take()
         .parse_next(input)?;
@@ -327,15 +330,143 @@ fn nodes(input: &mut Input<'_>) -> PResult<KdlDocument> {
 /// node := base-node node-space* node-terminator
 /// final-node := base-node node-space* node-terminator?
 fn node(input: &mut Input<'_>) -> PResult<KdlNode> {
-    let leading = repeat(0.., alt((line_space.void(), (slashdash, base_node).void())))
+    let leading = repeat(0.., alt((line_space.void(), slashdashed_node)))
         .map(|()| ())
         .take()
         .parse_next(input)?;
-    let mut nd = base_node.parse_next(input)?;
+    let mut nd = base_node_or_chain.parse_next(input)?;
     if let Some(fmt) = nd.format_mut() {
         fmt.leading = leading.into();
     }
     Ok(nd)
+}
+
+/// `slashdash base-node node-terminator?`
+///
+/// A slashdashed node can be followed by its own `;`, e.g. `/- a; b`.
+fn slashdashed_node(input: &mut Input<'_>) -> PResult<()> {
+    (slashdash, base_node_or_chain, opt(";"))
+        .void()
+        .parse_next(input)
+}
+
+/// Parses a base node and any pipe stages when node pipes are enabled.
+fn base_node_or_chain(input: &mut Input<'_>) -> PResult<KdlNode> {
+    #[cfg(feature = "experimental-node-pipes")]
+    {
+        pipe_chain(input)
+    }
+    #[cfg(not(feature = "experimental-node-pipes"))]
+    {
+        base_node(input)
+    }
+}
+
+/// `pipe := '#>'`
+#[cfg(feature = "experimental-node-pipes")]
+fn pipe(input: &mut Input<'_>) -> PResult<()> {
+    "#>".void().parse_next(input)
+}
+
+/// `pipe-chain := base-node (line-space* slashdash? pipe line-space* base-node)*`
+///
+/// `a #> b` is equivalent to `b { a }`. The node after a pipe cannot have
+/// a children block. A semicolon ends the chain.
+#[cfg(feature = "experimental-node-pipes")]
+fn pipe_chain(input: &mut Input<'_>) -> PResult<KdlNode> {
+    let mut child = base_node.parse_next(input)?;
+    // Preserve slashdashed stages between the child and the next pipe.
+    let mut before_pipe = String::new();
+
+    loop {
+        let start = input.checkpoint();
+        let space = repeat(0.., line_space)
+            .map(|()| ())
+            .take()
+            .parse_next(input)?;
+        let slashdashed = opt(slashdash.take()).parse_next(input)?;
+        if opt(pipe).parse_next(input)?.is_none() {
+            input.reset(&start);
+            break;
+        }
+        let after_pipe = repeat(0.., line_space)
+            .map(|()| ())
+            .take()
+            .parse_next(input)?;
+
+        let before_stage = input.checkpoint();
+        let (stage, stage_text) = cut_err(
+            base_node
+                .with_taken()
+                .context(cx().msg("Expected a node after #>").lbl("node")),
+        )
+        .parse_next(input)?;
+
+        // The parser peeked at the child's terminator without consuming it.
+        // Store the text before the pipe in the pipe formatting.
+        if let Some(fmt) = child.format_mut() {
+            before_pipe.push_str(&std::mem::take(&mut fmt.before_terminator));
+            fmt.terminator.clear();
+            fmt.trailing.clear();
+        }
+        before_pipe.push_str(space);
+
+        if let Some(slashdashed) = slashdashed {
+            before_pipe.push_str(slashdashed);
+            before_pipe.push_str("#>");
+            before_pipe.push_str(after_pipe);
+            before_pipe.push_str(stage_text);
+            if let (Some(fmt), Some(stage_fmt)) = (child.format_mut(), stage.format()) {
+                fmt.terminator = stage_fmt.terminator.clone();
+            }
+            continue;
+        }
+
+        // Keep the nested form valid if formatting cannot preserve the pipe.
+        if let Some(fmt) = child.format_mut() {
+            fmt.terminator = "\n".into();
+        }
+
+        let mut stage = stage;
+        if stage.children.is_some() {
+            return Err(ErrMode::Cut(KdlParseError {
+                message: Some("A node following #> cannot have a children block".into()),
+                span: Some(span_from_checkpoint(input, &before_stage)),
+                label: Some("children".into()),
+                help: Some(
+                    "Use the nested form instead, e.g. `b { a }` rather than `a #> b {}`".into(),
+                ),
+                severity: Some(Severity::Error),
+            }));
+        }
+
+        // The chain's leading whitespace belongs to the outermost node.
+        if let (Some(stage_fmt), Some(fmt)) = (stage.format_mut(), child.format_mut()) {
+            stage_fmt.leading = std::mem::take(&mut fmt.leading);
+        }
+
+        child.piped = Some(KdlPipeFormat {
+            before_pipe: std::mem::take(&mut before_pipe),
+            after_pipe: after_pipe.into(),
+        });
+        #[cfg(feature = "span")]
+        let span = child.span;
+        stage.children = Some(KdlDocument {
+            nodes: vec![child],
+            format: None,
+            #[cfg(feature = "span")]
+            span,
+        });
+        child = stage;
+    }
+
+    if !before_pipe.is_empty()
+        && let Some(fmt) = child.format_mut()
+    {
+        fmt.before_terminator.insert_str(0, &before_pipe);
+    }
+
+    Ok(child)
 }
 
 fn base_node(input: &mut Input<'_>) -> PResult<KdlNode> {
@@ -403,7 +534,7 @@ fn base_node(input: &mut Input<'_>) -> PResult<KdlNode> {
     .parse_next(input)?;
     let (before_terminator, terminator) = if children.is_some() {
         (
-            opt(slashdashed_children).take(),
+            (opt(slashdashed_children), node_space0).take(),
             peek(opt(node_terminator).take()),
         )
             .parse_next(input)?
@@ -433,6 +564,8 @@ fn base_node(input: &mut Input<'_>) -> PResult<KdlNode> {
             terminator: terminator.into(),
             ..Default::default()
         }),
+        #[cfg(feature = "experimental-node-pipes")]
+        piped: None,
         #[cfg(feature = "span")]
         span: span_from_checkpoint(input, &_start),
     })
@@ -454,6 +587,8 @@ fn test_node() {
             entries: vec![],
             children: None,
             format: Some(Default::default()),
+            #[cfg(feature = "experimental-node-pipes")]
+            piped: None,
             #[cfg(feature = "span")]
             span: (0..7).into()
         }
@@ -485,6 +620,8 @@ fn test_node() {
             format: Some(KdlNodeFormat {
                 ..Default::default()
             }),
+            #[cfg(feature = "experimental-node-pipes")]
+            piped: None,
             #[cfg(feature = "span")]
             span: (0..8).into()
         }
@@ -844,6 +981,14 @@ fn badval(input: &mut Input<'_>) -> PResult<()> {
 }
 
 fn value_terminator(input: &mut Input<'_>) -> PResult<()> {
+    #[cfg(feature = "experimental-node-pipes")]
+    {
+        let start = input.checkpoint();
+        if pipe.parse_next(input).is_ok() {
+            return Ok(());
+        }
+        input.reset(&start);
+    }
     alt((
         eof.void(),
         "=".void(),
@@ -1554,6 +1699,8 @@ mod string_tests {
 fn keyword(input: &mut Input<'_>) -> PResult<KdlValue> {
     let _ = "#".parse_next(input)?;
     not(one_of(['#', '"'])).parse_next(input)?;
+    #[cfg(feature = "experimental-node-pipes")]
+    not('>').parse_next(input)?;
     cut_err(alt((
         "true".value(KdlValue::Bool(true)),
         "false".value(KdlValue::Bool(false)),
@@ -1731,6 +1878,8 @@ fn slashdash_tests() {
     assert!(document.parse(new_input("/- foo bar")).is_ok());
     assert!(document.parse(new_input("/- foo bar;")).is_ok());
     assert!(document.parse(new_input("/-n 1;")).is_ok());
+    assert!(document.parse(new_input("/- foo; bar")).is_ok());
+    assert!(document.parse(new_input("node\n/- foo; bar")).is_ok());
     assert!(node.parse(new_input("/- foo\nbar baz")).is_ok());
     assert!(node_entry.parse(new_input("/-commented tada")).is_ok());
     assert!(node.parse(new_input("foo /- { }")).is_ok());

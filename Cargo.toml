@@ -16,6 +16,7 @@ default = ["span", "serde"]
 span = []
 v1-fallback = ["v1"]
 v1 = ["kdlv1"]
+experimental-node-pipes = []
 
 [workspace]
 members = ["tools/*"]

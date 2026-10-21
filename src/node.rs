@@ -25,6 +25,9 @@ pub struct KdlNode {
     pub(crate) entries: Vec<KdlEntry>,
     pub(crate) children: Option<KdlDocument>,
     pub(crate) format: Option<KdlNodeFormat>,
+    /// Pipe formatting for a node written as `node #> parent`.
+    #[cfg(feature = "experimental-node-pipes")]
+    pub(crate) piped: Option<KdlPipeFormat>,
     #[cfg(feature = "span")]
     pub(crate) span: SourceSpan,
 }
@@ -36,6 +39,7 @@ impl PartialEq for KdlNode {
             && self.entries == other.entries
             && self.children == other.children
             && self.format == other.format
+            && self.piped_eq(other)
         // intentionally omitted: self.span == other.span
     }
 }
@@ -47,6 +51,8 @@ impl std::hash::Hash for KdlNode {
         self.entries.hash(state);
         self.children.hash(state);
         self.format.hash(state);
+        #[cfg(feature = "experimental-node-pipes")]
+        self.piped.hash(state);
         // Intentionally omitted: self.span.hash(state);
     }
 }
@@ -63,9 +69,21 @@ impl KdlNode {
                 trailing: "\n".into(),
                 ..Default::default()
             }),
+            #[cfg(feature = "experimental-node-pipes")]
+            piped: None,
             #[cfg(feature = "span")]
             span: SourceSpan::from(0..0),
         }
+    }
+
+    #[cfg(feature = "experimental-node-pipes")]
+    fn piped_eq(&self, other: &Self) -> bool {
+        self.piped == other.piped
+    }
+
+    #[cfg(not(feature = "experimental-node-pipes"))]
+    fn piped_eq(&self, _other: &Self) -> bool {
+        true
     }
 
     /// Gets this node's name.
@@ -133,6 +151,10 @@ impl KdlNode {
     /// use [`Self::clear_format_recursive`].
     pub fn clear_format(&mut self) {
         self.format = None;
+        #[cfg(feature = "experimental-node-pipes")]
+        {
+            self.piped = None;
+        }
     }
 
     /// Clears leading and trailing text (whitespace, comments), as well as
@@ -277,6 +299,10 @@ impl KdlNode {
     pub fn autoformat_config(&mut self, config: &FormatConfig<'_>) {
         if self.format.is_none() {
             self.set_format(KdlNodeFormat::default());
+        }
+        #[cfg(feature = "experimental-node-pipes")]
+        {
+            self.piped = None;
         }
         if let Some(KdlNodeFormat {
             leading,
@@ -434,6 +460,8 @@ impl From<kdlv1::KdlNode> for KdlNode {
                 terminator: terminator.into(),
                 trailing: trailing.unwrap_or_else(|| "".into()),
             }),
+            #[cfg(feature = "experimental-node-pipes")]
+            piped: None,
             #[cfg(feature = "span")]
             span: SourceSpan::new(value.span().offset().into(), value.span().len()),
         }
@@ -837,6 +865,44 @@ impl KdlNode {
         } else {
             write!(f, "{:indent$}", "", indent = indent)?;
         }
+        self.stringify_content(f, indent)?;
+        if let Some(KdlNodeFormat {
+            before_terminator,
+            terminator,
+            trailing,
+            ..
+        }) = self.format()
+        {
+            write!(f, "{before_terminator}{terminator}{trailing}")?;
+        }
+        Ok(())
+    }
+
+    /// Returns the child and pipe formatting for `child #> node`, if available.
+    #[cfg(feature = "experimental-node-pipes")]
+    fn piped_child(&self) -> Option<(&KdlNode, &KdlPipeFormat)> {
+        match self.children.as_ref()?.nodes() {
+            [child] => child.piped.as_ref().map(|piped| (child, piped)),
+            _ => None,
+        }
+    }
+
+    /// Writes the node without leading whitespace, a terminator, or trailing whitespace.
+    fn stringify_content(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        indent: usize,
+    ) -> std::fmt::Result {
+        #[cfg(feature = "experimental-node-pipes")]
+        let piped_child = self.piped_child();
+        #[cfg(feature = "experimental-node-pipes")]
+        if let Some((child, piped)) = piped_child {
+            child.stringify_content(f, indent)?;
+            write!(f, "{}#>{}", piped.before_pipe, piped.after_pipe)?;
+        }
+        #[cfg(not(feature = "experimental-node-pipes"))]
+        let piped_child: Option<()> = None;
+
         if let Some(ty) = &self.ty {
             if let Some(KdlNodeFormat {
                 before_ty_name,
@@ -859,7 +925,7 @@ impl KdlNode {
             write!(f, "{entry}")?;
             space_before_children = entry.format().is_none();
         }
-        if let Some(children) = &self.children {
+        if let Some(children) = self.children.as_ref().filter(|_| piped_child.is_none()) {
             if let Some(KdlNodeFormat {
                 before_children, ..
             }) = self.format()
@@ -878,17 +944,18 @@ impl KdlNode {
             }
             write!(f, "}}")?;
         }
-        if let Some(KdlNodeFormat {
-            before_terminator,
-            terminator,
-            trailing,
-            ..
-        }) = self.format()
-        {
-            write!(f, "{before_terminator}{terminator}{trailing}")?;
-        }
         Ok(())
     }
+}
+
+/// Formatting for the node before a pipe, as in `node #> parent`.
+#[cfg(feature = "experimental-node-pipes")]
+#[derive(Debug, Clone, Default, Hash, Eq, PartialEq)]
+pub(crate) struct KdlPipeFormat {
+    /// Whitespace, comments, and slashdashed stages between the node and the `#>`.
+    pub(crate) before_pipe: String,
+    /// Whitespace and comments between the `#>` and the parent node.
+    pub(crate) after_pipe: String,
 }
 
 /// Formatting details for [`KdlNode`].

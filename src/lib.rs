@@ -113,6 +113,14 @@
 //!   fails, try again with `v1`. For `KdlDocument`, a heuristic will be applied
 //!   if both `v1` and `v2` parsers fail, to pick which error(s) to return. For
 //!   other types, only the `v2` parser's errors will be returned.
+//! * `experimental-node-pipes` - Adds support for experimental node pipes, which
+//!   are not part of the KDL specification. The expression `a #> b` is equivalent
+//!   to `b { a }`. A chain such as `a #> b #> c` is equivalent to `c { b { a } }`.
+//!   A pipe at the start of a line continues the preceding node's chain. A
+//!   slashdash (`/-`) before `#>` comments out a single stage. Formatting a
+//!   parsed document preserves each pipe as long as the parent still has the
+//!   original node as its only child. Clearing the child's formatting or
+//!   autoformatting the document replaces the pipe with the nested form.
 //!
 //! ## Quirks
 //!
